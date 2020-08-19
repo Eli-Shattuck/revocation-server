@@ -5,6 +5,7 @@ import (
   "net/http"
   "revocation-server/tree"
   "fmt"
+  "log"
 )
 
 type Handler struct {}
@@ -32,6 +33,10 @@ type AddRevocationRequest struct {
 
 func (r *AddRevocationRequest) GetSerial() string {
   return r.Serial
+}
+
+type AddRevocationsRequest struct {
+  Serials []string
 }
 
 
@@ -93,6 +98,7 @@ func (h *Handler) GetInclusionProof(rw http.ResponseWriter, req *http.Request) {
 }
 
 func (h *Handler) AddRevocation(rw http.ResponseWriter, req *http.Request) {
+  log.Println("Adding revocation")
   if req.Method != "POST" {
 		writeWrongMethodResponse(&rw, "POST")
 		return
@@ -109,6 +115,30 @@ func (h *Handler) AddRevocation(rw http.ResponseWriter, req *http.Request) {
 		writeErrorResponse(&rw, http.StatusInternalServerError, fmt.Sprintf("Unable to store revocation: %v", err))
 		return
 	}
+	rw.WriteHeader(http.StatusOK)
+}
+
+func (h *Handler) AddRevocations(rw http.ResponseWriter, req *http.Request) {
+  log.Println("Adding revocations")
+  if req.Method != "POST" {
+		writeWrongMethodResponse(&rw, "POST")
+		return
+	}
+
+	decoder := json.NewDecoder(req.Body)
+	var a AddRevocationsRequest
+	if err := decoder.Decode(&a); err != nil {
+		writeErrorResponse(&rw, http.StatusBadRequest, fmt.Sprintf("Invalid AddRevocations Request: %v", err))
+		return
+	}
+
+        for _,s := range(a.Serials) {
+	  if err := tree.AddNode(s); err != nil {
+		  writeErrorResponse(&rw, http.StatusInternalServerError, fmt.Sprintf("Unable to store revocation: %v", err))
+		  return
+	  }
+        }
+        tree.PrintCount()
 	rw.WriteHeader(http.StatusOK)
 }
 

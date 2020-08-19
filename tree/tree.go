@@ -5,9 +5,12 @@ import (
   "fmt"
   "revocation-server/types"
   "revocation-server/rfc6962"
+  "revocation-server/padding"
   "os"
   "encoding/hex"
   "errors"
+  "encoding/binary"
+  "encoding/gob"
 )
 
 //global var
@@ -15,13 +18,26 @@ var (
   tree = types.NewTree() //maps id to node pointer
   height int //final height of tree
   nodesCount int = 0 //we ignore root in this variable, for use in ID-ing new nodes
-  storageFile string = "storage.pb.bin"
+  storageFile string = "storage.bin"
   zeroHashes [][]byte //precomputed values for zero-leaf or zero-children hashes
   hasher *rfc6962.Hasher
+  maxCerts uint64
 )
 
 func setCount(count int) {
   *(&nodesCount) = count
+}
+
+func SaveToFile() {
+  encodeFile,err := os.Create(storageFile)
+  if err != nil {
+    panic(err)
+  }
+  encoder := gob.NewEncoder(encodeFile)
+
+  if err := encoder.Encode(tree); err != nil {
+    panic(err)
+  }
 }
 
 func PrintTree() error {
@@ -33,21 +49,32 @@ func PrintTree() error {
   return nil
 }
 
-func nextPow2(v int32) int32 { 
+func PrintCount() {
+  fmt.Printf("Current nodesCount = %d\n",nodesCount)
+}
+
+func nextPow2(v uint64) uint64 { 
   v = v - 1
   v = v | v >> 1;
   v = v | v >> 2;
   v = v | v >> 4;
   v = v | v >> 8;
   v = v | v >> 16;
+  v = v | v >> 32;
   v = v + 1
   return v;
 }
 
-func getMaxHeight(maxCerts int32) int {
+func nextMult8(v int) int { 
+  v = (v+7)&(-8)
+  return v;
+}
+
+func getMaxHeight(maxCerts uint64) int {
   p := nextPow2(maxCerts)
   h := math.Log2(float64(p))
-  return int(h)
+  v := nextMult8(int(math.Ceil(h)))
+  return v
 }
 
 func precomputeHashes(h int) error {
@@ -76,17 +103,19 @@ func Initialize(cfg types.Config) error {
   // set hasher
   hasher = rfc6962.DefaultHasher
 
-  _, err := os.Stat(storageFile)
-  if os.IsNotExist(err) { 
-    err := initializeFirstTime(cfg)
-    if err != nil {
-      return err
-    }
-  }
+//  _, err := os.Stat(storageFile)
+//  if os.IsNotExist(err) { 
+//    err := initializeFirstTime(cfg)
+//    if err != nil {
+//      return err
+//    }
+//  }
+  err := initializeFirstTime(cfg)
   // cfg vars to global
   fmt.Printf("Setting global vars\n")
-  h := getMaxHeight(int32(cfg.MaxCerts))
+  h := getMaxHeight(uint64(cfg.MaxCerts))
   *(&height) = h
+  maxCerts = uint64(cfg.MaxCerts)
 
   fmt.Printf("Tree height = %d\n",h)
 
@@ -180,15 +209,21 @@ func GetInclusionProof(serialString string) ([][]byte,error) {
 
 // accepts string hex serial, i.e "078c"
 func AddNode(serialString string) error {
-  fmt.Printf("Adding leaf node %v\n",serialString)
+//  fmt.Printf("Adding leaf node %v\n",serialString)
   serial, err := hex.DecodeString(serialString)
   if err != nil {
     return err
   }
-  fmt.Printf("Decoded string: %v\n",serial)
-  decodedLen := len(serial)
-  if((decodedLen*8)>height) {
-    return errors.New("Provided serial number indicates greater height than current tree's max height, to store more revocations, increase MaxCerts in the Config file")
+//  fmt.Printf("Decoded string: %v\n",serial)
+
+  // Check that we didnt recieve a request that exceeds maxcerts
+  padded,err := padding.LeftPad(serial,64)
+  if err != nil {
+    return err
+  }
+  num := binary.BigEndian.Uint64(padded)
+  if(num>maxCerts) {
+    return errors.New("Provided serial number exceeds current tree's max number of certs, to store more revocations, increase MaxCerts in the Config file")
   }
 
   curNodeId := 0
@@ -204,10 +239,10 @@ func AddNode(serialString string) error {
     for i:=0; i<8; i++ {
       goright := mask & v
       if(goright > 0) {
-        fmt.Println("Right")
+//        fmt.Println("Right")
         nextNodeId = curNode.GetRight()
         if(nextNodeId==-1) {
-          fmt.Println("Creating Node")
+//          fmt.Println("Creating Node")
           count+=1
           nextNodeId=count
           curNode.SetRight(nextNodeId)
@@ -215,10 +250,10 @@ func AddNode(serialString string) error {
           tree[nextNodeId] = nextNode
         }
       } else { //go left
-        fmt.Println("Left")
+//        fmt.Println("Left")
         nextNodeId = curNode.GetLeft()
         if(nextNodeId==-1) {
-          fmt.Println("Creating Node")
+//          fmt.Println("Creating Node")
           count+=1
           nextNodeId=count
           curNode.SetLeft(nextNodeId)
@@ -226,7 +261,7 @@ func AddNode(serialString string) error {
           tree[nextNodeId] = nextNode
         }
       }
-      print(nextNodeId,"\n")
+//      print(nextNodeId,"\n")
       curNode = tree[nextNodeId]
       curNodeId = curNode.GetId()
       mask = mask >> 1
@@ -241,7 +276,7 @@ func AddNode(serialString string) error {
 
 
   // hash up impacted nodes, starting with leaf node added
-  fmt.Println("hashing up")
+//  fmt.Println("hashing up")
   h := 0 //height counter as we go up
   curHash := hasher.HashLeaf([]byte{1}) //we could index this, leaving as TODO(jeremy) for now
   curNodeId = curNode.GetId()
