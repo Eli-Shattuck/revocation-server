@@ -2,43 +2,57 @@ package handler
 
 import (
   "encoding/json"
+  "encoding/asn1"
   "net/http"
+  "revocation-server/types"
   "revocation-server/tree"
+  "revocation-server/crypto/ocsp"
   "fmt"
-  "log"
+  "github.com/golang/glog"
+  "crypto/x509"
+  "crypto/x509/pkix"
+  "crypto/ecdsa"
+  "io/ioutil"
+  "time"
 )
 
-type Handler struct {}
-
-
-type MthResponse struct {
-  Data []byte
+type Handler struct {
+  t *tree.MerkleTree
+  cert *x509.Certificate
+  key *ecdsa.PrivateKey
 }
 
-type InclusionProofResponse struct {
-  Proof [][]byte
+func NewHandler(t *tree.MerkleTree, cert *x509.Certificate, key *ecdsa.PrivateKey) Handler {
+  return Handler{t,cert,key}
 }
 
-type InclusionProofRequest struct {
-  Serial string
+// get-sth, post-revocation, get-inclusion-proof are json-encoded
+// for ease of use right now, can be changed later
+// get-ocsp uses ocsp request/response ietf specification
+
+type GetInclusionProofRequest struct {
+  serial uint64
 }
 
-func (r *InclusionProofRequest) GetSerial() string {
-  return r.Serial
+type GetInclusionProofResponse struct {
+  proof [][]byte
 }
 
-type AddRevocationRequest struct {
-  Serial string
+// Ocsp Request/Response types defined in revocation-server/ocsp
+// asn.1/der encoded
+
+type PostRevocationRequest struct {
+  serial uint64
 }
 
-func (r *AddRevocationRequest) GetSerial() string {
-  return r.Serial
+// for mass-revocation event, or for testing
+type PostMultipleRevocationsRequest struct {
+  serials []uint64
 }
 
-type AddRevocationsRequest struct {
-  Serials []string
+type ProofResponse struct {
+  proof [][]byte
 }
-
 
 func writeWrongMethodResponse(rw *http.ResponseWriter, allowed string) {
 	(*rw).Header().Add("Allow", allowed)
@@ -50,44 +64,47 @@ func writeErrorResponse(rw *http.ResponseWriter, status int, body string) {
 	(*rw).Write([]byte(body))
 }
 
-// Really this is an MTH for now, TODO(jeremy)
-func (h *Handler) GetSTH(rw http.ResponseWriter, req *http.Request) {
+func (h *Handler) GetSth(rw http.ResponseWriter, req *http.Request) {
+  glog.V(1).Infoln("Received GetSth Request")
   if req.Method != "GET" {
     writeWrongMethodResponse(&rw, "GET")
     return
   }
 
-  mthData := tree.GetMTH()
-  mth := &MthResponse{Data:mthData}
+  var sthData *types.SignedLogRoot
+  sthData = h.t.GetSth()
+  if(sthData==nil) {
+    writeErrorResponse(&rw, http.StatusInternalServerError, fmt.Sprintf("Sth is nil pointer"))
+  }
 
   // convert to json
   encoder := json.NewEncoder(rw)
-  if err := encoder.Encode(*mth); err != nil {
-    writeErrorResponse(&rw, http.StatusInternalServerError, fmt.Sprintf("Couldn't encode MTH to return: %v", err))
+  if err := encoder.Encode(*sthData); err != nil {
+    writeErrorResponse(&rw, http.StatusInternalServerError, fmt.Sprintf("Couldn't encode STH to return: %v", err))
     return
   }
 }
 
 func (h *Handler) GetInclusionProof(rw http.ResponseWriter, req *http.Request) {
+  glog.V(1).Infoln("Received GetInclusionProof Request")
   if req.Method != "GET" {
     writeWrongMethodResponse(&rw, "GET")
     return
   }
 
   decoder := json.NewDecoder(req.Body)
-  var p InclusionProofRequest
+  var p GetInclusionProofRequest
   if err := decoder.Decode(&p); err != nil {
     writeErrorResponse(&rw, http.StatusInternalServerError, fmt.Sprintf("Invalid InclusionProofRequest: %v", err))
     return
   }
     
-
-  serial := p.Serial
-  proof, err := tree.GetInclusionProof(serial)
+  serial := p.serial
+  proof, err := h.t.GetInclusionProof(serial)
   if err != nil {
     writeErrorResponse(&rw, http.StatusInternalServerError, fmt.Sprintf("Unable to get inclusion proof from storage: %v", err))
   }
-  proofResponse := &InclusionProofResponse{Proof:proof}
+  proofResponse := &GetInclusionProofResponse{proof}
 
   // convert to json
   encoder := json.NewEncoder(rw)
@@ -97,51 +114,128 @@ func (h *Handler) GetInclusionProof(rw http.ResponseWriter, req *http.Request) {
   }
 }
 
-func (h *Handler) AddRevocation(rw http.ResponseWriter, req *http.Request) {
-  log.Println("Adding revocation")
+func (h *Handler) PostRevocation(rw http.ResponseWriter, req *http.Request) {
+  glog.V(1).Infoln("Received PostRevocation Request")
   if req.Method != "POST" {
 		writeWrongMethodResponse(&rw, "POST")
 		return
 	}
 
 	decoder := json.NewDecoder(req.Body)
-	var a AddRevocationRequest
+	var a PostRevocationRequest
 	if err := decoder.Decode(&a); err != nil {
 		writeErrorResponse(&rw, http.StatusBadRequest, fmt.Sprintf("Invalid AddRevocation Request: %v", err))
 		return
 	}
 
-	if err := tree.AddNode(a.Serial); err != nil {
+	if err := h.t.AddNode(a.serial); err != nil {
 		writeErrorResponse(&rw, http.StatusInternalServerError, fmt.Sprintf("Unable to store revocation: %v", err))
 		return
 	}
 	rw.WriteHeader(http.StatusOK)
 }
 
-func (h *Handler) AddRevocations(rw http.ResponseWriter, req *http.Request) {
-  log.Println("Adding revocations")
+func (h *Handler) PostMultipleRevocations(rw http.ResponseWriter, req *http.Request) {
+  glog.V(1).Infoln("Received PostMultipleRevocations Request")
   if req.Method != "POST" {
 		writeWrongMethodResponse(&rw, "POST")
 		return
 	}
 
 	decoder := json.NewDecoder(req.Body)
-	var a AddRevocationsRequest
+	var a PostMultipleRevocationsRequest
 	if err := decoder.Decode(&a); err != nil {
 		writeErrorResponse(&rw, http.StatusBadRequest, fmt.Sprintf("Invalid AddRevocations Request: %v", err))
 		return
 	}
 
-        for _,s := range(a.Serials) {
-	  if err := tree.AddNode(s); err != nil {
+  for _,s := range(a.serials) {
+	  if err := h.t.AddNode(s); err != nil {
 		  writeErrorResponse(&rw, http.StatusInternalServerError, fmt.Sprintf("Unable to store revocation: %v", err))
 		  return
 	  }
-        }
-        tree.PrintCount()
+  }
 	rw.WriteHeader(http.StatusOK)
 }
 
-func NewHandler() Handler {
-  return Handler{}
+func (h *Handler) GetOcsp(rw http.ResponseWriter, req *http.Request) {
+  glog.V(1).Infoln("Received GetOcsp Request")
+  if req.Method != "GET" {
+		writeWrongMethodResponse(&rw, "GET")
+		return
+	}
+
+  var parsed *ocsp.Request
+  body, err := ioutil.ReadAll(req.Body)
+  if err != nil {
+		writeErrorResponse(&rw, http.StatusBadRequest, fmt.Sprintf("error reading body: %v", err))
+		return
+	}
+  parsed, exts, err := ocsp.ParseRequest(body)
+  if err != nil {
+		writeErrorResponse(&rw, http.StatusBadRequest, fmt.Sprintf("Parse error during Ocsp Request: %v", err))
+		return
+	}
+
+  // Extract serial number from request
+  var serial uint64
+  serial = parsed.SerialNumber
+
+  // Check if revoked
+  revoked,err := h.t.GetRevocationValue(serial)
+  if err != nil {
+		writeErrorResponse(&rw, http.StatusBadRequest, fmt.Sprintf("Error while checking revocation value corresponding to serial: %v", err))
+		return
+	}
+
+  // Get proof
+  proof, err := h.t.GetInclusionProof(serial)
+  if err != nil {
+    writeErrorResponse(&rw, http.StatusInternalServerError, fmt.Sprintf("Unable to get inclusion proof from storage: %v", err))
+  }
+
+  // chose oid for "Transparency Information X.509v3 extension"
+  // detailed in https://tools.ietf.org/html/draft-ietf-trans-rfc6962-bis-34
+  // Not correctly implemented according to specification
+  // Should convert proof []byte into a serialized TransItem as talked about in rfc6962
+  idTransInfo := asn1.ObjectIdentifier([]int{1,3,101,75})
+
+  // serialize proof to json []byte
+  proofjson := ProofResponse{proof}
+  proofb, err := json.Marshal(proofjson)
+  if err != nil {
+    writeErrorResponse(&rw, http.StatusInternalServerError, fmt.Sprintf("Couldn't encode proof as json: %v", err))
+    return
+  }
+  proofext := pkix.Extension{Id: idTransInfo, Critical: false, Value: proofb}
+  proofextarray := []pkix.Extension{proofext}
+
+  // Marshal response
+  var status int
+  if(revoked) {
+    status = ocsp.Revoked
+  } else {
+    status = ocsp.Good
+  }
+
+  rtemplate := ocsp.Response{
+    Status:           status,
+		SerialNumber:     serial,
+		Certificate:      h.cert,
+		RevocationReason: ocsp.Unspecified,
+		IssuerHash:       parsed.HashAlgorithm,
+		RevokedAt:        time.Time{}, //nil time, our implementation does not support time of revocation
+		ThisUpdate:       h.t.LastUpdated,
+		NextUpdate: h.t.NextUpdate,
+		Extensions: exts,
+    ExtraExtensions: proofextarray,
+  }
+
+  resp, err := ocsp.CreateResponse(h.cert,rtemplate,h.key)
+  if err != nil {
+    writeErrorResponse(&rw, http.StatusInternalServerError, fmt.Sprintf("Error marshalling response to asn1: %v", err))
+  }
+
+  rw.WriteHeader(http.StatusOK)
+  rw.Write(resp)
 }
