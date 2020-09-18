@@ -1,5 +1,20 @@
 #!/bin/bash
 
+## Check you are at root of repo, will need to modify this if you changed directory names
+url="http://localhost:8080"
+curdir=${PWD##*/}
+if [ $curdir != "revocation-server" ]; then
+  echo "Must run from the root of the repository, cd to base of revocation-server"
+  exit 1
+fi
+
+## Check if server is up
+curl "{$url}/" && echo "Server is up"
+if [ ! "$?" -eq 0 ]; then
+  echo "Revocation server is not up (or not running on expected port 8080)"
+  exit 1
+fi
+
 url="http://localhost:8080/new-ct"
 
 jsonType='Content-Type:application/json'

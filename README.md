@@ -21,4 +21,5 @@ Requests/Responses for all endpoints except get-ocsp are json-encoded for ease o
 get-ocsp request/response are DER encoded and conform to RFC6960 Specification.
 
 ## Testing
+First, cd into cmd/revocation-server and compile server.go, generateRequest.go and parseResponse.go
 Basic functionality tests for all endpoints, and ocsp tests are detailed in the testing directory
