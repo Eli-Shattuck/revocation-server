@@ -65,12 +65,10 @@ func (s *Signer) Sign(data []byte) ([]byte, error) {
 // SignLogRoot returns a complete SignedLogRoot (including signature).
 func (s *Signer) SignLogRoot(r *types.LogRootV1) (*types.SignedLogRoot, error) {
 	logRoot, err := r.MarshalBinary()
-  glog.V(3).Infof("logroot = %v\n",logRoot)
 	if err != nil {
 		return nil, err
 	}
 	signature, err := s.Sign(logRoot)
-  glog.V(3).Infof("signature over logroot = %v\n",signature)
 	if err != nil {
 		glog.Warningf("%v: signer failed to sign log root: %v", s.KeyHint, err)
 		return nil, err

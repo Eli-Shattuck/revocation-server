@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"strconv"
 	"time"
+  "encoding/binary"
+  "bytes"
 )
 
 var idPKIXOCSPBasic = asn1.ObjectIdentifier([]int{1, 3, 6, 1, 5, 5, 7, 48, 1, 1})
@@ -79,7 +81,7 @@ type certID struct {
 	HashAlgorithm pkix.AlgorithmIdentifier
 	NameHash      []byte
 	IssuerKeyHash []byte
-	SerialNumber  uint64
+	SerialNumber  []byte
 }
 
 // https://tools.ietf.org/html/rfc2560#section-4.1.1
@@ -315,7 +317,7 @@ type Request struct {
 	HashAlgorithm  crypto.Hash
 	IssuerNameHash []byte
 	IssuerKeyHash  []byte
-	SerialNumber   uint64 //(Jeremy) Changed this from *big.Int, since our tree only supports uint64 serials, which should be large enough for our purposes
+	SerialNumber   []byte //(Jeremy) Changed this from *big.Int, since our tree only supports uint64 serials, which should be large enough for our purposes
 }
 
 // Marshal marshals the OCSP request to ASN.1 DER encoded form.
@@ -349,7 +351,7 @@ func (req *Request) Marshal() ([]byte, error) {
 type Response struct {
 	// Status is one of {Good, Revoked, Unknown}
 	Status                                        int
-	SerialNumber                                  uint64
+	SerialNumber                                  []byte
 	ProducedAt, ThisUpdate, NextUpdate, RevokedAt time.Time
 	RevocationReason                              int
 	Certificate                                   *x509.Certificate
@@ -410,9 +412,9 @@ func (p ParseError) Error() string {
 // ParseRequest parses an OCSP request in DER form. It only supports
 // requests for a single certificate. Signed requests are not supported.
 // If a request includes a signature, it will result in a ParseError.
-func ParseRequest(bytes []byte) (*Request, []pkix.Extension, error) {
+func ParseRequest(b []byte) (*Request, []pkix.Extension, error) {
 	var req ocspRequest
-	rest, err := asn1.Unmarshal(bytes, &req)
+	rest, err := asn1.Unmarshal(b, &req)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -457,9 +459,9 @@ func ParseResponse(bytes []byte, issuer *x509.Certificate, serial uint64) (*Resp
 //
 // Invalid signatures or parse failures will result in a ParseError. Error
 // responses will result in a ResponseError.
-func ParseResponseForCert(bytes []byte, issuer *x509.Certificate,serial uint64) (*Response, error) {
+func ParseResponseForCert(Bytes []byte, issuer *x509.Certificate,serial uint64) (*Response, error) {
 	var resp responseASN1
-	rest, err := asn1.Unmarshal(bytes, &resp)
+	rest, err := asn1.Unmarshal(Bytes, &resp)
 	if err != nil {
 		return nil, err
 	}
@@ -497,9 +499,10 @@ func ParseResponseForCert(bytes []byte, issuer *x509.Certificate,serial uint64) 
 			return nil, err
 		}
 
-		if err := ret.CheckSignatureFrom(ret.Certificate); err != nil {
-			return nil, ParseError("bad OCSP signature")
-		}
+    // This will not work, because we return the signature over LogRoot, not the signature over the response
+//		if err := ret.CheckSignatureFrom(ret.Certificate); err != nil {
+//			return nil, ParseError("bad OCSP signature ret.Certificate")
+//		}
 
 		if issuer != nil {
 			if err := issuer.CheckSignature(ret.Certificate.SignatureAlgorithm, ret.Certificate.RawTBSCertificate, ret.Certificate.Signature); err != nil {
@@ -508,14 +511,15 @@ func ParseResponseForCert(bytes []byte, issuer *x509.Certificate,serial uint64) 
 		}
 	} else if issuer != nil {
 		if err := ret.CheckSignatureFrom(issuer); err != nil {
-			return nil, ParseError("bad OCSP signature")
+			return nil, ParseError("bad OCSP signature issuer")
 		}
 	}
 
 	var r singleResponse
+  serialb := make([]byte,8)
+  binary.BigEndian.PutUint64(serialb,serial)
 	for _, resp := range basicResp.TBSResponseData.Responses {
-//		if cert == nil || cert.SerialNumber.Cmp(resp.CertID.SerialNumber) == 0 {
-		if (serial == resp.CertID.SerialNumber) {
+		if (bytes.Equal(serialb,resp.CertID.SerialNumber)) {
 			r = resp
 			break
 		}
@@ -609,12 +613,16 @@ func CreateRequest(issuer *x509.Certificate, serial uint64) ([]byte, error) {
 	h.Write(issuer.RawSubject)
 	issuerNameHash := h.Sum(nil)
 
+  serialb := make([]byte,8)
+  binary.BigEndian.PutUint64(serialb,serial)
+
 	req := &Request{
 		HashAlgorithm:  hashFunc,
 		IssuerNameHash: issuerNameHash,
 		IssuerKeyHash:  issuerKeyHash,
-		SerialNumber:   serial,
+		SerialNumber:   serialb,
 	}
+
 	return req.Marshal()
 }
 

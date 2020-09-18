@@ -3,6 +3,7 @@ package handler
 import (
   "encoding/json"
   "encoding/asn1"
+  "encoding/binary"
   "net/http"
   "revocation-server/types"
   "revocation-server/tree"
@@ -30,28 +31,29 @@ func NewHandler(t *tree.MerkleTree, cert *x509.Certificate, key *ecdsa.PrivateKe
 // for ease of use right now, can be changed later
 // get-ocsp uses ocsp request/response ietf specification
 
+// Something to know is that for json decoding to work correctly, all struct var's must be capitalized
 type GetInclusionProofRequest struct {
-  serial uint64
+  Serial uint64
 }
 
 type GetInclusionProofResponse struct {
-  proof [][]byte
+  Proof [][]byte
 }
 
 // Ocsp Request/Response types defined in revocation-server/ocsp
 // asn.1/der encoded
 
 type PostRevocationRequest struct {
-  serial uint64
+  Serial uint64
 }
 
 // for mass-revocation event, or for testing
 type PostMultipleRevocationsRequest struct {
-  serials []uint64
+  Serials []uint64
 }
 
 type ProofResponse struct {
-  proof [][]byte
+  Proof [][]byte
 }
 
 func writeWrongMethodResponse(rw *http.ResponseWriter, allowed string) {
@@ -99,7 +101,7 @@ func (h *Handler) GetInclusionProof(rw http.ResponseWriter, req *http.Request) {
     return
   }
     
-  serial := p.serial
+  serial := p.Serial
   proof, err := h.t.GetInclusionProof(serial)
   if err != nil {
     writeErrorResponse(&rw, http.StatusInternalServerError, fmt.Sprintf("Unable to get inclusion proof from storage: %v", err))
@@ -128,7 +130,7 @@ func (h *Handler) PostRevocation(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if err := h.t.AddNode(a.serial); err != nil {
+	if err := h.t.AddNode(a.Serial); err != nil {
 		writeErrorResponse(&rw, http.StatusInternalServerError, fmt.Sprintf("Unable to store revocation: %v", err))
 		return
 	}
@@ -149,7 +151,7 @@ func (h *Handler) PostMultipleRevocations(rw http.ResponseWriter, req *http.Requ
 		return
 	}
 
-  for _,s := range(a.serials) {
+  for _,s := range(a.Serials) {
 	  if err := h.t.AddNode(s); err != nil {
 		  writeErrorResponse(&rw, http.StatusInternalServerError, fmt.Sprintf("Unable to store revocation: %v", err))
 		  return
@@ -165,12 +167,14 @@ func (h *Handler) GetOcsp(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+  glog.V(3).Infoln("Reading request body")
   var parsed *ocsp.Request
   body, err := ioutil.ReadAll(req.Body)
   if err != nil {
 		writeErrorResponse(&rw, http.StatusBadRequest, fmt.Sprintf("error reading body: %v", err))
 		return
 	}
+  glog.V(3).Infoln("Parsing request")
   parsed, exts, err := ocsp.ParseRequest(body)
   if err != nil {
 		writeErrorResponse(&rw, http.StatusBadRequest, fmt.Sprintf("Parse error during Ocsp Request: %v", err))
@@ -178,8 +182,10 @@ func (h *Handler) GetOcsp(rw http.ResponseWriter, req *http.Request) {
 	}
 
   // Extract serial number from request
-  var serial uint64
-  serial = parsed.SerialNumber
+  var serialb []byte
+  serialb = parsed.SerialNumber
+  serial := uint64(binary.BigEndian.Uint64(serialb))
+  glog.V(3).Infof("Got serial from request %v\n",serialb)
 
   // Check if revoked
   revoked,err := h.t.GetRevocationValue(serial)
@@ -188,11 +194,15 @@ func (h *Handler) GetOcsp(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+  glog.V(3).Infof("Revocation value is %v\n",revoked)
+
   // Get proof
   proof, err := h.t.GetInclusionProof(serial)
   if err != nil {
     writeErrorResponse(&rw, http.StatusInternalServerError, fmt.Sprintf("Unable to get inclusion proof from storage: %v", err))
   }
+
+  glog.V(3).Infof("Length of proof = %v bytes\n",len(proof))
 
   // chose oid for "Transparency Information X.509v3 extension"
   // detailed in https://tools.ietf.org/html/draft-ietf-trans-rfc6962-bis-34
@@ -212,7 +222,7 @@ func (h *Handler) GetOcsp(rw http.ResponseWriter, req *http.Request) {
 
   // Marshal response
   var status int
-  if(revoked) {
+  if(revoked == true) {
     status = ocsp.Revoked
   } else {
     status = ocsp.Good
@@ -220,7 +230,7 @@ func (h *Handler) GetOcsp(rw http.ResponseWriter, req *http.Request) {
 
   rtemplate := ocsp.Response{
     Status:           status,
-		SerialNumber:     serial,
+		SerialNumber:     serialb,
 		Certificate:      h.cert,
 		RevocationReason: ocsp.Unspecified,
 		IssuerHash:       parsed.HashAlgorithm,
@@ -236,6 +246,5 @@ func (h *Handler) GetOcsp(rw http.ResponseWriter, req *http.Request) {
     writeErrorResponse(&rw, http.StatusInternalServerError, fmt.Sprintf("Error marshalling response to asn1: %v", err))
   }
 
-  rw.WriteHeader(http.StatusOK)
   rw.Write(resp)
 }

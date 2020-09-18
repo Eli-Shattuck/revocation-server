@@ -38,8 +38,8 @@ type MerkleTree struct {
   s *signer.Signer //contains hash/signer algo's for generating SLR's 
   slr *types.SignedLogRoot //updated by SignRoot
   mmd time.Duration
-  LastUpdated *string //updated by SignRoot
-  NextUpdate *string //updated by SignRoot
+  LastUpdated time.Time //updated by SignRoot, UTC time in response
+  NextUpdate time.Time //updated by SignRoot, UTC time in response
 
   zeroHashes [][]byte //precomputed values for zero-leaf or zero-children hashes
   queue []uint64 //Added nodes not yet incorporated in the tree
@@ -61,7 +61,7 @@ type Config struct { //input parameters for Initialize
 }
 
 // MerkleTree Methods
-func (t MerkleTree) SignRoot() error {
+func (t *MerkleTree) SignRoot() error {
   var newLogRoot *types.LogRootV1
   var newSLR *types.SignedLogRoot
 
@@ -82,8 +82,8 @@ func (t MerkleTree) SignRoot() error {
   // mutex
   t.Lock()
   t.slr = newSLR
-  t.LastUpdated = &(time.Now().String())
-  t.NextUpdate = &(time.Now().Add(t.mmd))
+  t.LastUpdated = time.Now()
+  t.NextUpdate = time.Now().Add(t.mmd)
   t.Unlock()
   return nil
 }
@@ -91,6 +91,8 @@ func (t MerkleTree) SignRoot() error {
 func Initialize(cfg Config) (*MerkleTree,*ecdsa.PrivateKey,*x509.Certificate,*time.Duration,error) {
   glog.V(2).Infoln("Loading Tree Parameters")
   h := getMaxHeight(cfg.MaxCerts)
+
+  glog.V(3).Infof("Tree height = %v\n",h)
   
   glog.V(2).Infoln("Reading in key file")
   key, err := getKeyFromFile(cfg.KeyPath) //private key for slr's
@@ -103,7 +105,9 @@ func Initialize(cfg Config) (*MerkleTree,*ecdsa.PrivateKey,*x509.Certificate,*ti
   hasher := rfc6962.DefaultHasher //for hashing leaves/nodes
   rootHash := hasher.EmptyRoot()
   root := Node{nil,nil,nil,rootHash}
-  maxSerial := uint64(math.Pow(2.0,float64(h)-1))
+  maxSerial := uint64(math.Pow(2.0,float64(h))-1)
+
+  glog.V(3).Infof("Maximum serial supported by height is %v\n",maxSerial)
 
   glog.V(2).Infoln("Parsing mmd string")
   mmdDuration,err := time.ParseDuration(cfg.Mmd)
@@ -122,15 +126,12 @@ func Initialize(cfg Config) (*MerkleTree,*ecdsa.PrivateKey,*x509.Certificate,*ti
     updatedTimes: uint64(0),
     mmd: mmdDuration,
     s: s,
+    queue: []uint64{},
   }
 
   glog.V(2).Infoln("Signing empty root")
   t.SignRoot()
 
-  t.Lock()
-  glog.V(3).Infoln("lastupdated,slr = %v, %v\n",t.LastUpdated,t.slr)
-  t.Unlock()
-  
   glog.V(2).Infoln("Precomputing zero hashes")
   zeroHashes := precomputeHashes(t.hashFunc,h)
   t.zeroHashes = zeroHashes
@@ -138,29 +139,34 @@ func Initialize(cfg Config) (*MerkleTree,*ecdsa.PrivateKey,*x509.Certificate,*ti
   return &t, key, cert, &mmdDuration, nil
 }
 
-func (t MerkleTree) GetSth() *types.SignedLogRoot {
-  t.Lock()
+func (t *MerkleTree) GetSth() *types.SignedLogRoot {
+  t.RLock()
   slr := t.slr
-  t.Unlock()
-  glog.Infof("slr = %v",slr)
+  t.RUnlock()
   return slr
 }
 
 // Loop through tree to see if leaf is present
 // true = revoked
-func (t MerkleTree) GetRevocationValue(serial uint64) (bool,error) {
+func (t *MerkleTree) GetRevocationValue(serial uint64) (bool,error) {
   mask := uint64(math.Pow(2,float64(t.height-1)))
   curNode := t.Root
+  glog.V(4).Infoln("Traversing tree, starting at root")
   for i:=0;i<(t.height-1);i++ {
     if(mask&serial>0) { 
+      glog.V(4).Infoln("Right")
       curNode = curNode.Right
     } else {
+      glog.V(4).Infoln("Left")
       curNode = curNode.Left
     }
 
     if(curNode==nil) {
+      glog.V(4).Infoln("Current node is nil pointer, must be non-revoked")
       return false,nil
     }
+
+    mask = mask >> 1
   }
 
   // if we make it to a leaf node it is revoked
@@ -168,7 +174,7 @@ func (t MerkleTree) GetRevocationValue(serial uint64) (bool,error) {
 }
 
 // Add node to the queue to be incorporated 
-func (t MerkleTree) AddNode(serial uint64) error {
+func (t *MerkleTree) AddNode(serial uint64) error {
   if(serial > t.maxSerial) {
     return errors.New("Request serial exceeds maximum serial storable by tree. Increase MaxCerts in config file")
   }
@@ -176,6 +182,7 @@ func (t MerkleTree) AddNode(serial uint64) error {
   // mutex
   t.Lock()
   t.queue = append(t.queue,serial)
+  glog.V(3).Infof("Queue = %v\n",t.queue)
   t.Unlock()
   return nil
 }
@@ -183,7 +190,7 @@ func (t MerkleTree) AddNode(serial uint64) error {
 // Starting from root, loop through serial in binary to place node in tree
 // 1 == right, 0 == left
 // runs in parallel with normal log operation
-func (t MerkleTree) IntegrateQueue() error {
+func (t *MerkleTree) IntegrateQueue() error {
   // Reset the queue, work with a copy to allow nodes to be added while integration is happening
   // mutex
   t.Lock()
@@ -198,13 +205,14 @@ func (t MerkleTree) IntegrateQueue() error {
     mask := uint64(math.Pow(2,float64(t.height-1)))
     curNode := t.Root
     var newNode *Node
-    for i:=0;i<(t.height-1);i++ {
+    for i:=0;i<t.height;i++ {
       if(mask&v>0) { 
         if(curNode.Right==nil) {
           newNode = &Node{curNode,nil,nil,nil}
           nodesIncreased += 1
           curNode.Right = newNode
         }
+        glog.V(4).Infoln("Integrating: right")
         curNode = curNode.Right
       } else {
         if(curNode.Left==nil) {
@@ -212,10 +220,11 @@ func (t MerkleTree) IntegrateQueue() error {
           nodesIncreased += 1
           curNode.Left = newNode
         }
+        glog.V(4).Infoln("Integrating: left")
         curNode = curNode.Left
       }
       mask = mask>>1
-      if(i==t.height-2) { //leaf node
+      if(i==t.height-1) { //leaf node
         integratedNodes[j] = newNode
       }
     }
@@ -226,33 +235,36 @@ func (t MerkleTree) IntegrateQueue() error {
   t.Lock()
   t.nodesCreated += nodesIncreased
   t.Unlock()
+  glog.V(2).Infof("Integrated %v nodes to tree, hashing up\n",nodesIncreased)
 
   // Hash up impacted nodes
   leafHash := t.hashFunc.HashLeaf([]byte{1})
   for _,v := range(integratedNodes) {
     curNode := v
     curNode.Hash = leafHash
-    curHeight := t.height
-    for (curNode!=t.Root) {
+    curHeight := t.height-1
+    for i:=0;i<t.height;i++ {
       curNode = curNode.Parent
       var leftHash,rightHash []byte
 
       if(curNode.Left==nil) {
-        leftHash = t.zeroHashes[curHeight]
+        leftHash = t.zeroHashes[curHeight+1]
       } else {
         leftHash = curNode.Left.Hash
       }
 
       if(curNode.Right==nil) {
-        rightHash = t.zeroHashes[curHeight]
+        rightHash = t.zeroHashes[curHeight+1]
       } else {
         rightHash = curNode.Right.Hash
       }
 
       curNode.Hash = t.hashFunc.HashChildren(leftHash,rightHash)
-      curHeight += 1
+      curHeight--
     }
   }
+
+  glog.V(2).Infoln("Tree hashing complete, updating merkleRoot")
 
   // Update MTH
   // mutex
@@ -262,13 +274,14 @@ func (t MerkleTree) IntegrateQueue() error {
   t.Unlock()
 
   // Sign the root
+  glog.V(2).Infoln("Signing root")
   err := t.SignRoot()
   if(err != nil){return err}
 
   return nil
 }
 
-func (t MerkleTree) GetInclusionProof(serial uint64) ([][]byte,error) {
+func (t *MerkleTree) GetInclusionProof(serial uint64) ([][]byte,error) {
   proof := make([][]byte,t.height)
 
   var curNode *Node
@@ -277,10 +290,8 @@ func (t MerkleTree) GetInclusionProof(serial uint64) ([][]byte,error) {
 
   mask := uint64(math.Pow(2,float64(t.height-1)))
   curNode = t.Root
-  curHeight := t.height-1
-  for i:=(t.height-1);i<0;i-- {
-    if(serial&mask>0) {
-      // Grab child for proof
+  for i:=1;i<t.height+1;i++ {
+    if(serial&mask>0) { // right
       temp = curNode.Left
       next = curNode.Right
     } else {
@@ -288,24 +299,21 @@ func (t MerkleTree) GetInclusionProof(serial uint64) ([][]byte,error) {
       next = curNode.Left
     }
 
-    // check if child is present
-    if(temp!=nil) {
-      proof[i] = temp.Hash
+    if(temp==nil) {
+      proof[t.height-i] = t.zeroHashes[i]
     } else {
-      proof[i] = t.zeroHashes[curHeight]
+      proof[t.height-i] = temp.Hash
     }
 
-    // check if next node is present
-    if(next!=nil) {
-      curNode = next
-      curHeight--
-    } else { //defaults for the rest of the proof
-      for(i<0) {
-        proof[i] = t.zeroHashes[curHeight]
-        curHeight--
-        i--
+    // check if next node present
+    // if it is, zero hashes for the rest of the proof
+    if(next==nil) {
+      for j:=i+1;j<t.height+1;j++ {
+        proof[t.height-j] = t.zeroHashes[j]
       }
       break;
+    } else {
+      mask = mask >> 1
     }
   }
   return proof, nil
@@ -337,18 +345,17 @@ func getCertFromFile(path string) (*x509.Certificate,error) {
 
 
 func precomputeHashes(hashFunc *rfc6962.Hasher, h int) ([][]byte) {
-  // precompute leaf 
+  // zeroHashes[height] = hash(0)
+  // zeroHashes[height-1] = hash(hash(0),hash(0))
+  // and so on
 
-  // indices are ordered backwards here when compared to the tree
-  // index 0 = leaf node hash of 0
-  // index (height) = root hash of all zero children when entire tree is empty
   zeroHashes := make([][]byte,h+1)
   var lastHash []byte
   lastHash = hashFunc.HashLeaf([]byte{0})
-  zeroHashes[0] = lastHash
-  for i:=0;i<h;i++ {
+  zeroHashes[h] = lastHash
+  for i:=h;i>-1;i-- {
     hash := hashFunc.HashChildren(lastHash,lastHash)
-    zeroHashes[i+1] = hash
+    zeroHashes[i] = hash
     lastHash = hash
   }
   return zeroHashes
@@ -367,7 +374,7 @@ func nextPow2(v uint64) uint64 {
 }
 
 func getMaxHeight(v uint64) int {
-  p := nextPow2(v)
+  p := nextPow2(v+1)
   h := int(math.Log2(float64(p)))
   return h
 }
