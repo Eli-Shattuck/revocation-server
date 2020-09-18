@@ -50,6 +50,16 @@ func main() {
   serveMux.HandleFunc("/new-ct/get-ocsp", handler.GetOcsp)
   serveMux.HandleFunc("/new-ct/post-revocation", handler.PostRevocation)
   serveMux.HandleFunc("/new-ct/post-multiple-revocations", handler.PostMultipleRevocations)
+
+  // Return a 200 on the root so clients can easily check if server is up
+  serveMux.HandleFunc("/", func(resp http.ResponseWriter, req *http.Request) {
+    if req.URL.Path == "/" {
+      resp.WriteHeader(http.StatusOK)
+    } else {
+      resp.WriteHeader(http.StatusNotFound)
+    }
+  })
+
   server := &http.Server {
     Addr: *listenAddress,
     Handler: serveMux,

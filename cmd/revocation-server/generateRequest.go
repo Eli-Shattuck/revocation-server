@@ -3,13 +3,11 @@ package main
 import (
   "flag"
   "github.com/golang/glog"
-  "encoding/hex"
   "encoding/pem"
   "crypto/x509"
-  "encoding/binary"
   "revocation-server/crypto/ocsp"
-  "revocation-server/padding"
   "io/ioutil"
+  "strconv"
 )
 
 var (
@@ -22,19 +20,16 @@ func main() {
   flag.Parse()
   defer glog.Flush()
 
-  var serial []byte = make([]byte,8)
-  var err error
-
+  var serial uint64
   // Check inputs
   if(*certSerial=="") {
     glog.Exitf("Serial number is a required argument, check --help for details")
-  } else {
-    // Check if hex input
-    serial, err = hex.DecodeString(*certSerial)
-    if(err!=nil) {
-      glog.Exitf("Could not parse input as hex string: %v",err.Error())
-    }
   }
+
+  serial, err := strconv.ParseUint(*certSerial,10,64)
+  if(err!=nil) {glog.Exitf("Could not parse input as uint64")}
+
+  glog.Infof("serial = %v\n",serial)
 
   ct, err := ioutil.ReadFile(*issuerCertFile)
   if err != nil {
@@ -46,14 +41,10 @@ func main() {
     glog.Exit(err)
   }
 
-  padded,err := padding.LeftPad(serial,8)
+  req, err := ocsp.CreateRequest(cert,serial)
   if err != nil {
-    glog.Exit(err)
+    glog.Exitf("failed to create request: %v\n",err)
   }
-  numRepresented := binary.BigEndian.Uint64(padded)
-
-
-  req, err := ocsp.CreateRequest(cert,numRepresented)
   glog.Infof("Request = %v\n",req)
 
   glog.Info("Writing request to file")
