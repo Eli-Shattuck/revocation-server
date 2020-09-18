@@ -31,7 +31,7 @@ curl -d '{"Serial":5}' -H $jsonType $handle
 curl -d '{"Serial":15}' -H $jsonType $handle
 curl -d '{"Serial":27}' -H $jsonType $handle
 
-echo "After 30s mmd they will be integrated into the tree"
+echo "After 20s mmd they will be integrated into the tree"
 echo -e "\n"
 sleep 20
 
