@@ -47,7 +47,7 @@ echo -e "\n"
 
 echo "What happens if we try and revoke a serial number larger than maxSerial for the tree?"
 echo "Assumes tree height of 20"
-curl -X POST -H $jsonType -d '{"Serial": "1048576"}' "$url/post-revocation"
+curl -X POST -H $jsonType -d '{"Serial": 1048576}' "$url/post-revocation"
 sleep 5
 echo -e "\n"
 
