@@ -19,3 +19,6 @@ Exposed endpoints are as follows
 
 Requests/Responses for all endpoints except get-ocsp are json-encoded for ease of use.
 get-ocsp request/response are DER encoded and conform to RFC6960 Specification.
+
+## Testing
+Basic functionality tests for all endpoints, and ocsp tests are detailed in the testing directory
